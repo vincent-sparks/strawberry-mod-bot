@@ -15,9 +15,9 @@ use std::io::Write;
 
 
 // If set, bot commands will be visible only in this guild.  Leave at None for production use.
-//const DEBUG_GUILD: Option<Id<GuildMarker>> = None;
+const DEBUG_GUILD: Option<Id<GuildMarker>> = None;
 //const DEBUG_GUILD: Option<Id<GuildMarker>> = Some(Id::new(/* your numeric server ID here */));
-const DEBUG_GUILD: Option<Id<GuildMarker>> = Some(Id::new(1191491525432070174));
+//const DEBUG_GUILD: Option<Id<GuildMarker>> = Some(Id::new(1191491525432070174));
 
 use twl_fw::{CommandFunc, CommandMap, build_command};
 use once_cell::sync::Lazy;
