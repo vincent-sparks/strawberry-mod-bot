@@ -7,6 +7,7 @@ use twilight_model::channel::message::embed::EmbedField;
 use twilight_model::guild::{Permissions, PartialMember};
 use twilight_model::id::Id;
 use twilight_model::id::marker::{GuildMarker, ChannelMarker, RoleMarker};
+use twilight_model::user::User;
 use twilight_util::builder::InteractionResponseDataBuilder;
 use twilight_util::builder::embed::EmbedBuilder;
 use twl_fw::InteractionHandler;
@@ -14,23 +15,30 @@ use twl_fw::response;
 
 use anyhow::anyhow;
 
-use crate::commands::ReasonCommand;
+use crate::commands::{ReasonCommand, ChannelCommand, AddModRoleCommand};
 use crate::{get_config, save_config};
 
 use toml_edit::value;
 
+fn get_guild(inter: &Interaction, data: &CommandData) -> anyhow::Result<Id<GuildMarker>> {
+    inter.guild_id
+        .or(data.guild_id)
+        .ok_or(anyhow!("Cannot figure out what guild this command is being run in."))
+}
+
+fn get_initiating_user(inter: &Interaction) -> anyhow::Result<&User> {
+    inter.user.as_ref()
+        .or(inter.member.as_ref().and_then(|x: &PartialMember|x.user.as_ref()))
+        .ok_or(anyhow!("Can't figure out who sent this interaction"))
+}
+
 
 pub(crate) async fn delete_message(handler: Arc<InteractionHandler>, inter: Interaction, data: CommandData) -> anyhow::Result<()> {
+    let guild_id = get_guild(&inter, &data)?;
+    let moderator_user = get_initiating_user(&inter)?;
+
     // incantation to get the message object we were invoked with
     let offending_message = data.resolved.unwrap().messages.remove(&Id::new(data.target_id.unwrap().get())).unwrap();
-
-    let guild_id = inter.guild_id
-        .or(data.guild_id)
-        .ok_or(anyhow!("Cannot figure out what guild this command is being run in."))?;
-
-    let moderator_user = inter.user.as_ref()
-        .or(inter.member.as_ref().and_then(|x: &PartialMember|x.user.as_ref()))
-        .ok_or(anyhow!("Can't figure out who sent this interaction"))?;
 
     if let Some(modlog_channel_id) = get_modlog_channel(guild_id) {
         let mut builder = EmbedBuilder::new()
@@ -63,21 +71,17 @@ fn format_user(user: &twilight_model::user::User) -> String {
     }
 }
 
-pub(crate) async fn purge_hour(handler: Arc<InteractionHandler>, inter: Interaction, data: CommandData) -> anyhow::Result<()> {
+pub(crate) async fn purge_hour(handler: Arc<InteractionHandler>, inter: Interaction, _data: CommandData) -> anyhow::Result<()> {
     response!(handler, inter, "Purge hour command received.  It does not do anything yet.");
     Ok(())
 }
 
 pub(crate) async fn reason(handler: Arc<InteractionHandler>, inter: Interaction, data: CommandData) -> anyhow::Result<()> {
-    let guild_id = inter.guild_id
-        .or(data.guild_id)
-        .ok_or(anyhow!("Cannot figure out what guild this command is being run in."))?;
+    let guild_id = get_guild(&inter, &data)?;
+    let moderator_user = get_initiating_user(&inter)?;
 
     let cmd = ReasonCommand::from_interaction(data.into())?;
 
-    let moderator_user = inter.user.as_ref()
-        .or(inter.member.as_ref().and_then(|x: &PartialMember|x.user.as_ref()))
-        .ok_or(anyhow!("Can't figure out who sent this interaction"))?;
 
     if let Some(modlog_channel_id) = get_modlog_channel(guild_id) {
         let mut builder = EmbedBuilder::new()
@@ -89,8 +93,9 @@ pub(crate) async fn reason(handler: Arc<InteractionHandler>, inter: Interaction,
             builder = builder.field(EmbedField {name: "Channel".to_string(), value: format!("<#{}>", channel.id), inline: false});
         }
         handler.client.create_message(modlog_channel_id).embeds(&[builder.build()])?.await?;
+        response!(ephemeral; handler, inter, "Reason recorded in the modlog.");
     } else {
-        response!(handler, inter, "The modlog channel in this server has not been set up yet.  Moderation action will be logged to the logfile only.");
+        response!(ephemeral; handler, inter, "The modlog channel in this server has not been set up yet.  Moderation action will be logged to the logfile only.");
     };
     
     // TODO logfile
@@ -98,21 +103,19 @@ pub(crate) async fn reason(handler: Arc<InteractionHandler>, inter: Interaction,
     Ok(())
 }
 
-pub(crate) async fn configure(handler: Arc<InteractionHandler>, inter: Interaction, data: CommandData) -> anyhow::Result<()> {
-    let guild_id = inter.guild_id
-        .or(data.guild_id)
-        .ok_or(anyhow!("Cannot figure out what guild this command is being run in."))?;
+pub(crate) async fn channel(handler: Arc<InteractionHandler>, inter: Interaction, data: CommandData) -> anyhow::Result<()> {
+    let guild_id = get_guild(&inter, &data)?;
 
-    let me = handler.cache().current_user().ok_or(anyhow!("Didn't get current_user from READY event..."))?;
-
+    let cmd = ChannelCommand::from_interaction(data.into())?;
 
     // this is Rust, you're just going to have to get used to seeing lines like this one
-    let channel_id = inter.channel.as_ref().ok_or(anyhow!("Command is not being run in a channel????"))?.id;
+    let channel_id = cmd.channel;
 
-    // make sure the channel is in the cache, otherwise we can't get permissions for it.
     /*
+    // make sure the channel is in the cache, otherwise we can't get permissions for it.
+    let me = handler.cache().current_user().ok_or(anyhow!("Didn't get current_user from READY event..."))?;
     if handler.cache().channel(channel_id).is_none() {
-        handler.cache().update(&handler.client.channel(channel_id).await?.model().await?);
+        handler.cache().cache_channel(&handler.client.channel(channel_id).await?.model().await?);
     }
 
     if !handler.cache().permissions().in_channel(me.id, channel_id)?.contains(Permissions::SEND_MESSAGES) {
@@ -121,9 +124,63 @@ pub(crate) async fn configure(handler: Arc<InteractionHandler>, inter: Interacti
     }
     */
     
-    update_config(guild_id, Id::new(12345), channel_id);
+    update_config(guild_id, |guild_config| guild_config["modlog_channel_id"] = toml_edit::value(channel_id.get() as i64));
     
-    response!(handler, inter, "Configuration successful.  This is now the modlog channel.");
+    response!(handler, inter, "Configuration successful.  <#{}> is now the modlog channel.", channel_id);
+    Ok(())
+}
+
+pub(crate) async fn add_modrole(handler: Arc<InteractionHandler>, inter: Interaction, data: CommandData) -> anyhow::Result<()> {
+    let guild_id = get_guild(&inter, &data)?;
+    let cmd = AddModRoleCommand::from_interaction(data.into())?;
+    let role_id = cmd.role.get();
+    
+    let mut message = String::new();
+
+    update_config(guild_id, |guild_config| {
+        let Some(mod_roles) = guild_config.as_table_mut().and_then(|table| table.entry("moderator_roles").or_insert(toml_edit::value(toml_edit::Array::new())).as_array_mut()) else {
+            message = "Config file is not in a valid format.  No changes were made.".into();
+            return;
+        };
+        if mod_roles.iter().any(|s| s.as_integer().is_some_and(|val| val==role_id as i64)) {
+            message = "That role is already a moderator role.  ".into();
+        } else {
+            mod_roles.push(role_id as i64);
+            message = format!("Successfully made <@&{}> a moderator role.  ", role_id);
+        }
+        let current_role_ids = mod_roles.iter().filter_map(|x| x.as_integer()).collect::<Vec<i64>>();
+        message.push_str(&format_list_of_roles(&current_role_ids));
+    });
+
+    response!(ephemeral; handler, inter, "{}", message);
+
+    Ok(())
+}
+
+pub(crate) async fn del_modrole(handler: Arc<InteractionHandler>, inter: Interaction, data: CommandData) -> anyhow::Result<()> {
+    let guild_id = get_guild(&inter, &data)?;
+    let cmd = AddModRoleCommand::from_interaction(data.into())?;
+    let role_id = cmd.role.get();
+    
+    let mut message = String::new();
+
+    update_config(guild_id, |guild_config| {
+        let Some(mod_roles) = guild_config.as_table_mut().and_then(|table| table.entry("moderator_roles").or_insert(toml_edit::value(toml_edit::Array::new())).as_array_mut()) else {
+            message = "Config file is not in a valid format.  No changes were made.".into();
+            return;
+        };
+        let pos = mod_roles.iter().position(|s| s.as_integer().is_some_and(|val| val==role_id as i64));
+        if let Some(idx) = pos {
+            mod_roles.remove(idx);
+            message = format!("Successfully revoked moderator status from <@&{}>.  ", role_id);
+        } else {
+            message = "That role is already not a moderator role.  ".into();
+        }
+        let current_role_ids = mod_roles.iter().filter_map(|x| x.as_integer()).collect::<Vec<i64>>();
+        message.push_str(&format_list_of_roles(&current_role_ids));
+    });
+    response!(ephemeral; handler, inter, "{}", message);
+
     Ok(())
 }
 
@@ -131,7 +188,7 @@ pub(crate) async fn configure(handler: Arc<InteractionHandler>, inter: Interacti
 // (and thus does not allow us to use it with tokio) 
 // any non-Send value (the mutex guard) is assigned to a variable, regardless of whether it is held across an await
 // point
-fn update_config(guild_id: Id<GuildMarker>, role_id: Id<RoleMarker>, channel_id: Id<ChannelMarker>) {
+fn update_config<T>(guild_id: Id<GuildMarker>, action: impl FnOnce(&mut toml_edit::Item) -> T) -> T {
     let mut config = get_config().lock().unwrap();
     let guild_config = &mut config[guild_id.to_string().as_str()];
     //guild_config["role_id"] = value(0);
@@ -139,12 +196,13 @@ fn update_config(guild_id: Id<GuildMarker>, role_id: Id<RoleMarker>, channel_id:
     // config file to be negative for no reason!
     // but the only alternative I can see to doing it this way is converting the number to a string
     // which is arguably even uglier!
-    guild_config["modlog_channel_id"] = value(channel_id.get() as i64);
+    let res = action(guild_config);
     if let Some(t) = guild_config.as_inline_table() {
         *guild_config = toml_edit::Item::Table(t.clone().into_table());
     }
     std::mem::drop(config); // release our held mutex so that save_config() can acquire it again
     save_config();
+    res
 }
 
 // ditto
@@ -154,4 +212,13 @@ fn get_modlog_channel(guild_id: Id<GuildMarker>) -> Option<Id<ChannelMarker>> {
     let guild_config = config.get(guild_id.get().to_string().as_str())?;
     let channel_id = guild_config.get("modlog_channel_id")?.as_integer()? as u64;
     Some(Id::new(channel_id))
+}
+
+fn format_list_of_roles(role_ids: &[i64]) -> String {
+    if role_ids.len() == 1 {
+        format!("<@&{}> is currently the only moderator role.", role_ids[0] as u64)
+    } else {
+        let s = role_ids[..role_ids.len()-1].iter().map(|id| format!("<@&{}>", *id as u64)).collect::<Vec<_>>().join(", ");
+        format!("Current moderator roles are {} and <@&{}>", s, role_ids[role_ids.len()-1] as u64)
+    }
 }

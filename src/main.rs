@@ -4,7 +4,7 @@ mod commands;
 
 use std::{io::ErrorKind, sync::{Arc, Mutex}};
 
-use commands::{InitCommand, ReasonCommand};
+use commands::{ReasonCommand, ChannelCommand, AddModRoleCommand, DeleteModRoleCommand};
 use twilight_http::Client;
 use twilight_interactions::command::CreateCommand;
 use twilight_model::{id::{Id, marker::GuildMarker}, application::command::CommandType, guild::Permissions};
@@ -15,9 +15,9 @@ use std::io::Write;
 
 
 // If set, bot commands will be visible only in this guild.  Leave at None for production use.
-const DEBUG_GUILD: Option<Id<GuildMarker>> = None;
+//const DEBUG_GUILD: Option<Id<GuildMarker>> = None;
 //const DEBUG_GUILD: Option<Id<GuildMarker>> = Some(Id::new(/* your numeric server ID here */));
-//const DEBUG_GUILD: Option<Id<GuildMarker>> = Some(Id::new(1191491525432070174));
+const DEBUG_GUILD: Option<Id<GuildMarker>> = Some(Id::new(1191491525432070174));
 
 use twl_fw::{CommandFunc, CommandMap, build_command};
 use once_cell::sync::Lazy;
@@ -25,12 +25,16 @@ use phf::phf_map;
 
 static DELETE_MESSAGE_COMMAND: Lazy<CommandFunc> = build_command!(|handler, inter, data| business_logic::delete_message(handler, inter, data));
 static PURGE_HOUR_COMMAND: Lazy<CommandFunc> = build_command!(|handler, inter, data| business_logic::purge_hour(handler, inter, data));
-static CONFIGURE_COMMAND: Lazy<CommandFunc> = build_command!(|handler, inter, data| business_logic::configure(handler, inter, data));
+static CHANNEL_COMMAND: Lazy<CommandFunc> = build_command!(|handler, inter, data| business_logic::channel(handler, inter, data));
+static ADD_MODROLE_COMMAND: Lazy<CommandFunc> = build_command!(|handler, inter, data| business_logic::add_modrole(handler, inter, data));
+static DEL_MODROLE_COMMAND: Lazy<CommandFunc> = build_command!(|handler, inter, data| business_logic::del_modrole(handler, inter, data));
 static REASON_COMMAND: Lazy<CommandFunc> = build_command!(|handler, inter, data| business_logic::reason(handler, inter, data));
 
 static COMMAND_MAP: CommandMap = phf_map! {
     "reason" => &REASON_COMMAND,
-    "configure_moderation" => &CONFIGURE_COMMAND,
+    "channel" => &CHANNEL_COMMAND,
+    "add_moderator_role" => &ADD_MODROLE_COMMAND,
+    "delete_moderator_role" => &DEL_MODROLE_COMMAND,
     "Delete message" => &DELETE_MESSAGE_COMMAND,
     "Purge last hour" => &PURGE_HOUR_COMMAND,
 };
@@ -111,8 +115,10 @@ async fn main() -> Result<!, Box<dyn std::error::Error>> {
     // the second str argument is a description, which Discord does not currrently support for
     // message commands (it will error if they aren't blank)
     let commands = [
-        InitCommand::create_command().into(),
         ReasonCommand::create_command().into(),
+        ChannelCommand::create_command().into(),
+        AddModRoleCommand::create_command().into(),
+        DeleteModRoleCommand::create_command().into(),
         CommandBuilder::new("Delete message", "", CommandType::Message).build(),
         CommandBuilder::new("Purge last hour", "", CommandType::Message).build(),
     ];
