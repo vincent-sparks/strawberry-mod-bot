@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use twilight_interactions::command::CommandModel;
 use twilight_model::application::interaction::{application_command::CommandData, Interaction};
 use twilight_model::channel::message::MessageFlags;
 use twilight_model::channel::message::embed::EmbedField;
@@ -13,6 +14,7 @@ use twl_fw::response;
 
 use anyhow::anyhow;
 
+use crate::commands::ReasonCommand;
 use crate::{get_config, save_config};
 
 use toml_edit::value;
@@ -31,14 +33,16 @@ pub(crate) async fn delete_message(handler: Arc<InteractionHandler>, inter: Inte
         .ok_or(anyhow!("Can't figure out who sent this interaction"))?;
 
     if let Some(modlog_channel_id) = get_modlog_channel(guild_id) {
-        handler.client.create_message(modlog_channel_id).embeds(&[
-                EmbedBuilder::new()
-                        .title(format!("Message removed by moderator"))
-                        .description(offending_message.content)
-                        .field(EmbedField{name: "Sent by".to_string(), value: format_user(&offending_message.author), inline: false})
-                        .field(EmbedField{name: "Deleted by".to_string(), value: format_user(&moderator_user), inline: false})
-                        .build()
-        ])?.await?;
+        let mut builder = EmbedBuilder::new()
+                    .title(format!("Message removed by moderator"))
+                    .description(offending_message.content)
+                    .field(EmbedField{name: "Sent by".to_string(), value: format_user(&offending_message.author), inline: false})
+                    .field(EmbedField{name: "Deleted by".to_string(), value: format_user(&moderator_user), inline: false});
+        if let Some(channel) = &inter.channel {
+            // this *should* always be present but i'm not taking ANY chances
+            builder = builder.field(EmbedField {name: "Channel".to_string(), value: format!("<#{}>", channel.id), inline: false});
+        }
+        handler.client.create_message(modlog_channel_id).embeds(&[builder.build()])?.await?;
     } else {
         response!(handler, inter, "The modlog channel in this server has not been set up yet.  Moderation action will be logged to the logfile only.");
     };
@@ -48,19 +52,49 @@ pub(crate) async fn delete_message(handler: Arc<InteractionHandler>, inter: Inte
 
     handler.client.delete_message(offending_message.channel_id, offending_message.id).await?;
 
-    response!(ephemeral; handler, inter, "Deletion action logged");
+    response!(ephemeral; handler, inter, "Message deleted");
     Ok(())
 }
 
 fn format_user(user: &twilight_model::user::User) -> String {
     match user.discriminator {
-        0 => format!("@{} (User ID: {})", user.name, user.id),
-        disc => format!("{}#{:04} (User ID: {})", user.name, disc, user.id),
+        0 => format!("@{} (<@{}>)", user.name, user.id),
+        disc => format!("{}#{:04} (<@{}>)", user.name, disc, user.id),
     }
 }
 
 pub(crate) async fn purge_hour(handler: Arc<InteractionHandler>, inter: Interaction, data: CommandData) -> anyhow::Result<()> {
     response!(handler, inter, "Purge hour command received.  It does not do anything yet.");
+    Ok(())
+}
+
+pub(crate) async fn reason(handler: Arc<InteractionHandler>, inter: Interaction, data: CommandData) -> anyhow::Result<()> {
+    let guild_id = inter.guild_id
+        .or(data.guild_id)
+        .ok_or(anyhow!("Cannot figure out what guild this command is being run in."))?;
+
+    let cmd = ReasonCommand::from_interaction(data.into())?;
+
+    let moderator_user = inter.user.as_ref()
+        .or(inter.member.as_ref().and_then(|x: &PartialMember|x.user.as_ref()))
+        .ok_or(anyhow!("Can't figure out who sent this interaction"))?;
+
+    if let Some(modlog_channel_id) = get_modlog_channel(guild_id) {
+        let mut builder = EmbedBuilder::new()
+                        .title(format!("Reason added by moderator"))
+                        .field(EmbedField {name: "Moderator".to_string(), value: format_user(&moderator_user), inline: false})
+                        .description(cmd.reason);
+        if let Some(channel) = &inter.channel {
+            // this *should* always be present but i'm not taking ANY chances
+            builder = builder.field(EmbedField {name: "Channel".to_string(), value: format!("<#{}>", channel.id), inline: false});
+        }
+        handler.client.create_message(modlog_channel_id).embeds(&[builder.build()])?.await?;
+    } else {
+        response!(handler, inter, "The modlog channel in this server has not been set up yet.  Moderation action will be logged to the logfile only.");
+    };
+    
+    // TODO logfile
+
     Ok(())
 }
 
