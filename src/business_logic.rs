@@ -50,6 +50,9 @@ pub(crate) async fn delete_message(handler: Arc<InteractionHandler>, inter: Inte
             // this *should* always be present but i'm not taking ANY chances
             builder = builder.field(EmbedField {name: "Channel".to_string(), value: format!("<#{}>", channel.id), inline: false});
         }
+        for attachment in offending_message.attachments {
+            builder = builder.field(EmbedField {name: format!("Attachment: {}", attachment.filename), value: attachment.proxy_url, inline: false});
+        }
         handler.client.create_message(modlog_channel_id).embeds(&[builder.build()])?.await?;
     } else {
         response!(handler, inter, "The modlog channel in this server has not been set up yet.  Moderation action will be logged to the logfile only.");
