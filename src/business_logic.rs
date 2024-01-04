@@ -4,7 +4,7 @@ use twilight_interactions::command::CommandModel;
 use twilight_model::application::interaction::{application_command::CommandData, Interaction};
 use twilight_model::channel::message::MessageFlags;
 use twilight_model::channel::message::embed::EmbedField;
-use twilight_model::guild::{Permissions, PartialMember};
+use twilight_model::guild::{Permissions, PartialMember, Member};
 use twilight_model::id::Id;
 use twilight_model::id::marker::{GuildMarker, ChannelMarker, RoleMarker};
 use twilight_model::user::User;
@@ -36,6 +36,11 @@ fn get_initiating_user(inter: &Interaction) -> anyhow::Result<&User> {
 pub(crate) async fn delete_message(handler: Arc<InteractionHandler>, inter: Interaction, data: CommandData) -> anyhow::Result<()> {
     let guild_id = get_guild(&inter, &data)?;
     let moderator_user = get_initiating_user(&inter)?;
+
+    if !inter.member.as_ref().is_some_and(|member| is_user_a_moderator(&handler, member, guild_id)) {
+        response!(ephemeral; handler, inter, "You do not have permission to use that command.");
+        return Ok(());
+    }
 
     // incantation to get the message object we were invoked with
     let offending_message = data.resolved.unwrap().messages.remove(&Id::new(data.target_id.unwrap().get())).unwrap();
@@ -74,7 +79,12 @@ fn format_user(user: &twilight_model::user::User) -> String {
     }
 }
 
-pub(crate) async fn purge_hour(handler: Arc<InteractionHandler>, inter: Interaction, _data: CommandData) -> anyhow::Result<()> {
+pub(crate) async fn purge_hour(handler: Arc<InteractionHandler>, inter: Interaction, data: CommandData) -> anyhow::Result<()> {
+    let guild_id = get_guild(&inter, &data)?;
+    if !inter.member.as_ref().is_some_and(|member| is_user_a_moderator(&handler, member, guild_id)) {
+        response!(ephemeral; handler, inter, "You do not have permission to use that command.");
+        return Ok(());
+    }
     response!(handler, inter, "Purge hour command received.  It does not do anything yet.");
     Ok(())
 }
@@ -82,6 +92,11 @@ pub(crate) async fn purge_hour(handler: Arc<InteractionHandler>, inter: Interact
 pub(crate) async fn reason(handler: Arc<InteractionHandler>, inter: Interaction, data: CommandData) -> anyhow::Result<()> {
     let guild_id = get_guild(&inter, &data)?;
     let moderator_user = get_initiating_user(&inter)?;
+
+    if !inter.member.as_ref().is_some_and(|member| is_user_a_moderator(&handler, member, guild_id)) {
+        response!(ephemeral; handler, inter, "You do not have permission to use that command.");
+        return Ok(());
+    }
 
     let cmd = ReasonCommand::from_interaction(data.into())?;
 
@@ -218,10 +233,32 @@ fn get_modlog_channel(guild_id: Id<GuildMarker>) -> Option<Id<ChannelMarker>> {
 }
 
 fn format_list_of_roles(role_ids: &[i64]) -> String {
-    if role_ids.len() == 1 {
+    if role_ids.is_empty() {
+        return "No moderator roles are currently set.  Anyone who can see the moderator commands will be able to use them.".to_string();
+    } else if role_ids.len() == 1 {
         format!("<@&{}> is currently the only moderator role.", role_ids[0] as u64)
     } else {
         let s = role_ids[..role_ids.len()-1].iter().map(|id| format!("<@&{}>", *id as u64)).collect::<Vec<_>>().join(", ");
         format!("Current moderator roles are {} and <@&{}>", s, role_ids[role_ids.len()-1] as u64)
     }
+}
+
+fn is_user_a_moderator(handler: &InteractionHandler, member: &PartialMember, guild_id: Id<GuildMarker>) -> bool {
+    let config = get_config().lock().unwrap();
+    let Some(moderator_roles) = config.get(guild_id.get().to_string().as_str()).and_then(|guild_config| guild_config.get("moderator_roles")) else {
+        let guild_name = handler.cache().guild(guild_id).map(|guild| guild.name().to_owned()).unwrap_or_else(|| guild_id.to_string());
+        tracing::warn!("No moderator roles have been configured in server \"{}\"!  Allowing anyone who can see them to use moderation commands!", guild_name);
+        return true;
+    };
+    let Some(moderator_roles) = moderator_roles.as_array() else {
+        let guild_name = handler.cache().guild(guild_id).map(|guild| guild.name().to_owned()).unwrap_or_else(|| guild_id.to_string());
+        tracing::warn!("Configuration format in server {} is messed up.  Preventing anyone from using moderation commands.", guild_name);
+        return false;
+    };
+
+    if moderator_roles.is_empty() {
+        return true;
+    }
+
+    return moderator_roles.iter().filter_map(|entry| entry.as_integer()).any(|mod_role_id| member.roles.iter().any(|role| role.get() == mod_role_id as u64));
 }
