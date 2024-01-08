@@ -1,13 +1,15 @@
 #![feature(never_type)]
 mod business_logic;
 mod commands;
+mod disk_log;
 
-use std::{io::ErrorKind, sync::{Arc, Mutex}};
+use std::{io::ErrorKind, sync::{Arc, Mutex}, path::PathBuf};
+use std::env::VarError;
 
 use commands::{ReasonCommand, ChannelCommand, AddModRoleCommand, DeleteModRoleCommand};
 use twilight_http::Client;
 use twilight_interactions::command::CreateCommand;
-use twilight_model::{id::{Id, marker::GuildMarker}, application::command::CommandType, guild::Permissions};
+use twilight_model::{id::{Id, marker::GuildMarker}, application::command::CommandType};
 use twilight_util::builder::command::CommandBuilder;
 
 use twilight_gateway::{Intents, Shard, ShardId, Event};
@@ -40,6 +42,7 @@ static COMMAND_MAP: CommandMap = phf_map! {
 };
 
 static mut GLOBAL_CONFIG: Option<Mutex<toml_edit::Document>> = None; 
+static mut OUTPUT_PATH: Option<PathBuf> = None;
 
 
 pub(crate) fn get_config() -> &'static Mutex<toml_edit::Document> {
@@ -63,10 +66,14 @@ pub(crate) fn save_config() {
     }
 }
 
+pub(crate) fn get_output_path() -> &'static PathBuf {
+    unsafe {OUTPUT_PATH.as_ref().unwrap()}
+}
+
 #[tokio::main(flavor="current_thread")]
 async fn main() -> Result<!, Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::DEBUG)
+        .with_max_level(tracing::Level::INFO)
         .init();
 
     if let Err(e) = dotenvy::dotenv() {
@@ -75,7 +82,6 @@ async fn main() -> Result<!, Box<dyn std::error::Error>> {
 
 
     let authtoken = std::env::var("AUTHTOKEN").unwrap_or_else(|e| {
-        use std::env::VarError;
         match e {
             VarError::NotPresent => eprintln!("Environment variable AUTHTOKEN not set. Cannot sign into Discord.  Exiting."),
             VarError::NotUnicode(_) => eprintln!("Environment variable AUTHTOKEN is not valid UTF-8.  Exiting."),
@@ -83,6 +89,10 @@ async fn main() -> Result<!, Box<dyn std::error::Error>> {
         std::process::exit(1);
     });
 
+    let outputdir = std::env::var_os("OUTPUT_DIR").map_or_else(||std::env::current_dir().unwrap(), PathBuf::from);
+    unsafe {
+        OUTPUT_PATH = Some(outputdir);
+    }
     
     let config: toml_edit::Document;
     match std::fs::read_to_string("config.toml") {
@@ -120,7 +130,7 @@ async fn main() -> Result<!, Box<dyn std::error::Error>> {
         AddModRoleCommand::create_command().into(),
         DeleteModRoleCommand::create_command().into(),
         CommandBuilder::new("Delete message", "", CommandType::Message).build(),
-        CommandBuilder::new("Purge last hour", "", CommandType::Message).build(),
+        //CommandBuilder::new("Purge last hour", "", CommandType::Message).build(), // this is commented out until I can make it do something
     ];
 
     if let Some(guild_id) = DEBUG_GUILD {
@@ -154,8 +164,6 @@ async fn main() -> Result<!, Box<dyn std::error::Error>> {
                 let config = get_config().lock().unwrap();
                 tracing::info!("bot is in {} guilds, of which {} are configured", ready.guilds.len(), ready.guilds.iter().filter(|x| config.contains_key(x.id.to_string().as_str())).count());
                 tracing::info!("Strawberry Moderator reporting for duty!");
-            },
-            Event::MessageDelete(del) => {
             },
             _ => {},
         }

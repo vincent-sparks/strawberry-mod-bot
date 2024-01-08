@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use twilight_interactions::command::CommandModel;
 use twilight_model::application::interaction::{application_command::CommandData, Interaction};
@@ -16,6 +17,8 @@ use twl_fw::response;
 use anyhow::anyhow;
 
 use crate::commands::{ReasonCommand, ChannelCommand, AddModRoleCommand};
+use smb_log_format::{ModLogEntry, ModLogAction, ModLogMessage};
+use crate::disk_log::{ModLogEntryExt, ModLogMessageExt};
 use crate::{get_config, save_config};
 
 use toml_edit::value;
@@ -45,6 +48,8 @@ pub(crate) async fn delete_message(handler: Arc<InteractionHandler>, inter: Inte
     // incantation to get the message object we were invoked with
     let offending_message = data.resolved.unwrap().messages.remove(&Id::new(data.target_id.unwrap().get())).unwrap();
 
+    ModLogEntry::new(&moderator_user, inter.channel.as_ref().map(|x|x.id), SystemTime::now(), ModLogAction::DeleteMessage(ModLogMessage::from_message(&offending_message).await)).log();
+
     if let Some(modlog_channel_id) = get_modlog_channel(guild_id) {
         let mut builder = EmbedBuilder::new()
                     .title(format!("Message removed by moderator"))
@@ -62,9 +67,6 @@ pub(crate) async fn delete_message(handler: Arc<InteractionHandler>, inter: Inte
     } else {
         response!(handler, inter, "The modlog channel in this server has not been set up yet.  Moderation action will be logged to the logfile only.");
     };
-    
-    dbg!(&moderator_user.email);
-
 
     handler.client.delete_message(offending_message.channel_id, offending_message.id).await?;
 
@@ -89,6 +91,22 @@ pub(crate) async fn purge_hour(handler: Arc<InteractionHandler>, inter: Interact
     Ok(())
 }
 
+pub(crate) async fn purge_to_here(handler: Arc<InteractionHandler>, inter: Interaction, data: CommandData) -> anyhow::Result<()> {
+    let guild_id = get_guild(&inter, &data)?;
+    let moderator_user = get_initiating_user(&inter)?;
+
+    if !inter.member.as_ref().is_some_and(|member| is_user_a_moderator(&handler, member, guild_id)) {
+        response!(ephemeral; handler, inter, "You do not have permission to use that command.");
+        return Ok(());
+    }
+
+    // incantation to get the message object we were invoked with
+    let offending_message = data.resolved.unwrap().messages.remove(&Id::new(data.target_id.unwrap().get())).unwrap();
+
+    response!(handler, inter, "Purge hour command received.  It does not do anything yet.");
+    Ok(())
+}
+
 pub(crate) async fn reason(handler: Arc<InteractionHandler>, inter: Interaction, data: CommandData) -> anyhow::Result<()> {
     let guild_id = get_guild(&inter, &data)?;
     let moderator_user = get_initiating_user(&inter)?;
@@ -98,6 +116,8 @@ pub(crate) async fn reason(handler: Arc<InteractionHandler>, inter: Interaction,
         return Ok(());
     }
 
+    let timestamp = SystemTime::now();
+
     let cmd = ReasonCommand::from_interaction(data.into())?;
 
 
@@ -105,7 +125,7 @@ pub(crate) async fn reason(handler: Arc<InteractionHandler>, inter: Interaction,
         let mut builder = EmbedBuilder::new()
                         .title(format!("Reason added by moderator"))
                         .field(EmbedField {name: "Moderator".to_string(), value: format_user(&moderator_user), inline: false})
-                        .description(cmd.reason);
+                        .description(cmd.reason.clone());
         if let Some(channel) = &inter.channel {
             // this *should* always be present but i'm not taking ANY chances
             builder = builder.field(EmbedField {name: "Channel".to_string(), value: format!("<#{}>", channel.id), inline: false});
@@ -116,7 +136,7 @@ pub(crate) async fn reason(handler: Arc<InteractionHandler>, inter: Interaction,
         response!(ephemeral; handler, inter, "The modlog channel in this server has not been set up yet.  Moderation action will be logged to the logfile only.");
     };
     
-    // TODO logfile
+    ModLogEntry::new(&moderator_user, inter.channel.as_ref().map(|x|x.id), timestamp, ModLogAction::Reason(cmd.reason)).log();
 
     Ok(())
 }
@@ -161,10 +181,10 @@ pub(crate) async fn add_modrole(handler: Arc<InteractionHandler>, inter: Interac
             return;
         };
         if mod_roles.iter().any(|s| s.as_integer().is_some_and(|val| val==role_id as i64)) {
-            message = "That role is already a moderator role.  ".into();
+            message = "That role is already a moderator role.\n".into();
         } else {
             mod_roles.push(role_id as i64);
-            message = format!("Successfully made <@&{}> a moderator role.  ", role_id);
+            message = format!("Successfully made <@&{}> a moderator role.\n", role_id);
         }
         let current_role_ids = mod_roles.iter().filter_map(|x| x.as_integer()).collect::<Vec<i64>>();
         message.push_str(&format_list_of_roles(&current_role_ids));
@@ -190,9 +210,9 @@ pub(crate) async fn del_modrole(handler: Arc<InteractionHandler>, inter: Interac
         let pos = mod_roles.iter().position(|s| s.as_integer().is_some_and(|val| val==role_id as i64));
         if let Some(idx) = pos {
             mod_roles.remove(idx);
-            message = format!("Successfully revoked moderator status from <@&{}>.  ", role_id);
+            message = format!("Successfully revoked moderator status from <@&{}>.\n", role_id);
         } else {
-            message = "That role is already not a moderator role.  ".into();
+            message = "That role is already not a moderator role.\n".into();
         }
         let current_role_ids = mod_roles.iter().filter_map(|x| x.as_integer()).collect::<Vec<i64>>();
         message.push_str(&format_list_of_roles(&current_role_ids));
@@ -234,7 +254,7 @@ fn get_modlog_channel(guild_id: Id<GuildMarker>) -> Option<Id<ChannelMarker>> {
 
 fn format_list_of_roles(role_ids: &[i64]) -> String {
     if role_ids.is_empty() {
-        return "No moderator roles are currently set.  Anyone who can see the moderator commands will be able to use them.".to_string();
+        return "No moderator roles are currently set.  No one will be able to use the moderation commands.".to_string();
     } else if role_ids.len() == 1 {
         format!("<@&{}> is currently the only moderator role.", role_ids[0] as u64)
     } else {
@@ -245,20 +265,10 @@ fn format_list_of_roles(role_ids: &[i64]) -> String {
 
 fn is_user_a_moderator(handler: &InteractionHandler, member: &PartialMember, guild_id: Id<GuildMarker>) -> bool {
     let config = get_config().lock().unwrap();
-    let Some(moderator_roles) = config.get(guild_id.get().to_string().as_str()).and_then(|guild_config| guild_config.get("moderator_roles")) else {
+    let Some(moderator_roles) = config.get(guild_id.get().to_string().as_str()).and_then(|guild_config| guild_config.get("moderator_roles")).and_then(|moderator_roles| moderator_roles.as_array()) else {
         let guild_name = handler.cache().guild(guild_id).map(|guild| guild.name().to_owned()).unwrap_or_else(|| guild_id.to_string());
-        tracing::warn!("No moderator roles have been configured in server \"{}\"!  Allowing anyone who can see them to use moderation commands!", guild_name);
-        return true;
-    };
-    let Some(moderator_roles) = moderator_roles.as_array() else {
-        let guild_name = handler.cache().guild(guild_id).map(|guild| guild.name().to_owned()).unwrap_or_else(|| guild_id.to_string());
-        tracing::warn!("Configuration format in server {} is messed up.  Preventing anyone from using moderation commands.", guild_name);
+        tracing::warn!("No moderator roles have been configured in server \"{}\".  Preventing anyone from using moderation commands", guild_name);
         return false;
     };
-
-    if moderator_roles.is_empty() {
-        return true;
-    }
-
     return moderator_roles.iter().filter_map(|entry| entry.as_integer()).any(|mod_role_id| member.roles.iter().any(|role| role.get() == mod_role_id as u64));
 }
